@@ -1,155 +1,168 @@
-import os
-import pandas as pd
 import torch
-import torchvision.transforms as transforms
-from torchvision import models, transforms
+import torch.nn as nn
+from torch import optim
+from torch.utils.data import Dataset, DataLoader, random_split
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
-import matplotlib.pyplot as plt
-from textwrap import wrap
-import re
-import torch.optim as optim
-from collections import Counter
+from torchvision.transforms import Resize, ToTensor, Normalize, Compose
+from matplotlib import pyplot as plt
+
+from torchvision.models import resnet50,ResNet50_Weights 
+
+from io import open
 from utils import *
-from tqdm import tqdm
-caption_file_path = "captions.txt"  
-image_folder_path = "train"         
+from trainfnc import *
 
-data = pd.read_csv(caption_file_path)
+if torch.cuda.is_available():
+    device=torch.device(type='cuda', index=0)
+else:
+    device=torch.device(type='cpu', index=0)
 
-def readImage(image_name, img_size=224):
-    transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    img_path = os.path.join(image_folder_path, image_name)  
-    img = Image.open(img_path).convert('RGB')
-    img = transform(img)
-    return img
+capt_file_path="captions.txt"
+images_dir_path="train\\"
 
+#read data
+data=open(capt_file_path).read().strip().split('\n')
+data=data[1:]
 
-def display_images(temp_df):
-    temp_df = temp_df.reset_index(drop=True)
-    plt.figure(figsize=(20, 20))
-    n = 0
-    for i in range(15):
-        n += 1
-        plt.subplot(5, 5, n)
-        plt.subplots_adjust(hspace=0.7, wspace=0.3)
-        image = readImage(temp_df.image[i])  
-        plt.imshow(image.permute(1, 2, 0).numpy())  
-        plt.title("\n".join(wrap(temp_df.caption[i], 20)))  
-        plt.axis("off")
-    plt.show()
+img_filenames_list=[]
+captions_list=[]
 
+for s in data:
+    templist=s.lower().split(",")
+    img_path=templist[0]
+    caption=",".join(s for s in templist[1:])
+    caption=normalizeString(caption)
+    img_filenames_list.append(img_path)
+    captions_list.append(caption)
 
-def text_preprocessing(data):
-    data['caption'] = data['caption'].apply(lambda x: x.lower())
+max_cap_length=73
+
+vocab=Vocab()
+
+for caption in captions_list:
+    vocab.buildVocab(caption)
+
+print("Vocab Length:",vocab.nwords)
+
+dataset=CustomDataset(images_dir_path, img_filenames_list, captions_list, vocab, max_cap_length)
+train_dataset,test_dataset=random_split(dataset,[0.999,0.001])
+
+batch_size=64
+train_dataloader=DataLoader(dataset=train_dataset,batch_size=batch_size, shuffle=True)
+test_dataloader=DataLoader(dataset=test_dataset,batch_size=1, shuffle=False)
+
+pretrained_feature_extractor=resnet50(weights=ResNet50_Weights.DEFAULT)
+pretrained_feature_extractor.fc=nn.Linear(2048,1024)
+
+encoder=Encoder(pretrained_feature_extractor).to(device)
+
+embed_size=300
+hidden_size=1024
+
+decoder=Decoder(vocab.nwords,embed_size,hidden_size).to(device)
+
+def train_one_epoch():
+    encoder.train()
+    decoder.train()
+    track_loss=0
     
-    data['caption'] = data['caption'].apply(lambda x: re.sub(r"[^a-zA-Z\s]", "", x))
-    
-    data['caption'] = data['caption'].apply(lambda x: re.sub(r"\s+", " ", x).strip())
-    
-    data['caption'] = data['caption'].apply(lambda x: "startseq " + x + " endseq")
-    return data
-
-
-class Tokenizer:
-    def __init__(self, num_words=None, oov_token="<OOV>"):
-        self.word_index = {}
-        self.index_word = {}
-        self.vocab_size = 0
-        self.num_words = num_words  
-        self.oov_token = oov_token  
-        self.word_index[self.oov_token] = 1  
-        self.index_word[1] = self.oov_token 
-    
-    def fit_on_texts(self, texts):
-        counter = Counter()
+    for i, (imgs,t_ids) in enumerate(train_dataloader):
+        imgs=imgs.to(device)
+        t_ids=t_ids.to(device)
+        extracted_features=encoder(imgs)
+        #extracted_features=extracted_features.detach()
+        decoder_hidden=torch.reshape(extracted_features,(1,extracted_features.shape[0],-1))
+        yhats, decoder_hidden = decoder(t_ids[:,0:-1],decoder_hidden)
+                    
+        gt=t_ids[:,1:]
         
-        for text in texts:
-            counter.update(text.split())
+        yhats_reshaped=yhats.view(-1,yhats.shape[-1])
+        gt=gt.reshape(-1)
         
-        most_common_words = counter.most_common(self.num_words) if self.num_words else counter.items()
         
-        index = 2
-        for word, _ in most_common_words:
-            self.word_index[word] = index
-            self.index_word[index] = word
-            index += 1
+        loss=loss_fn(yhats_reshaped,gt)
+        track_loss+=loss.item()
         
-        self.vocab_size = len(self.word_index) + 1
-    
-    def texts_to_sequences(self, texts):
-        sequences = []
-        for text in texts:
-            sequences.append([self.word_index.get(word, 1) for word in text.split()])
-        return sequences
+        opte.zero_grad()
+        optd.zero_grad()
+        
+        loss.backward()
+        
+        opte.step()
+        optd.step()
+        
+        if i%50==0:
+            print("Mini Batch=", i+1," Running Loss=",track_loss/(i+1), sep="")
+        
+    return track_loss/len(train_dataloader)    
 
-tokenizer = Tokenizer(num_words=10000, oov_token="<OOV>")
-
-
-data = text_preprocessing(data)
-captions = data['caption'].tolist()
-
-
-
-tokenizer.fit_on_texts(captions)
-
-
-vocab_size = tokenizer.vocab_size
-print(vocab_size)
-max_length = max(len(caption.split()) for caption in captions)
-
-
-images = data['image'].unique().tolist()
-nimages = len(images)
-split_index = round(0.85 * nimages)
-
-train_images = images[:split_index]
-val_images = images[split_index:]
-
-train = data[data['image'].isin(train_images)]
-test = data[data['image'].isin(val_images)]
-
-train.reset_index(inplace=True, drop=True)
-test.reset_index(inplace=True, drop=True)
-
-tokenized_caption = tokenizer.texts_to_sequences([captions[100]])[0]
-print(tokenized_caption)
-print(captions[100])
-display_images(train.sample(15))
-model = models.densenet201(pretrained=True)
-fe = nn.Sequential(*list(model.children())[:-1])  
-
-img_size = 224
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-fe = fe.to(device)
-fe.eval()  
-
-features = {}
-transform = transforms.Compose([
-    transforms.Resize((img_size, img_size)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-for image in tqdm(data['image'].unique().tolist()):
-    img_path = os.path.join(image_folder_path, image)
-    img = Image.open(img_path).convert('RGB')
-    img = transform(img).unsqueeze(0).to(device)
+def eval_one_epoch():
+    encoder.eval()
+    decoder.eval()
+    track_loss=0
     
     with torch.no_grad():
-        feature = fe(img).cpu().numpy()
+        
+        for i, (imgs,t_ids) in enumerate(test_dataloader):
+            
+            imgs=imgs.to(device)
+            t_ids=t_ids.to(device)
+            
+            extracted_features=encoder(imgs)
+            
+            decoder_hidden=torch.reshape(extracted_features,(1,extracted_features.shape[0],-1)) #n_dim=3
+            
+            input_ids=t_ids[:,0]
+            yhats=[]
+            pred_sentence=""
+            
+            for j in range(1,max_cap_length+2): #j starts from 1
+                probs, decoder_hidden = decoder(input_ids.unsqueeze(1),decoder_hidden)
+                yhats.append(probs)
+                _,input_ids=torch.topk(probs,1,dim=-1)
+                input_ids=input_ids.squeeze(1,2) #still a tensor
+                word=vocab.index2word[input_ids.item()] #batch_size=1
+                pred_sentence+=word + " "
+                if input_ids.item() == 1: #batch_size=1
+                    break
+                                
+            
+            gt_sentence=ids2Sentence(t_ids,vocab)
+            
+            print("Input Image:")
+            img=imgs[0]
+            img[0]=(img[0]*0.229)+0.485
+            img[1]=(img[1]*0.224)+0.456
+            img[2]=(img[2]*0.225)+0.406
+            plt.imshow(torch.permute(imgs[0],(1,2,0)).detach().cpu())
+            plt.show()
+            
+            print("GT Sentence:",gt_sentence)
+            print("Predicted Sentence:",pred_sentence)
+            
+            yhats_cat=torch.cat(yhats,dim=1)
+            yhats_reshaped=yhats_cat.view(-1,yhats_cat.shape[-1])
+            gt=t_ids[:,1:j+1]
+            gt=gt.view(-1)
+            
+
+            loss=loss_fn(yhats_reshaped,gt)
+            track_loss+=loss.item()
+            
+            
+        print("-----------------------------------")
+        return track_loss/len(test_dataloader)    
     
-    features[image] = feature
+loss_fn=nn.NLLLoss(ignore_index=0).to(device)
+lr=0.001
 
-vocab_size = 10000  
-max_length = 20     
-caption_model = CaptioningModel(vocab_size, max_length)
+optd=optim.Adam(params=decoder.parameters(), lr=lr)
+opte=optim.Adam(params=encoder.parameters(), lr=lr)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(caption_model.parameters(), lr=0.001)
+n_epochs=5
 
-caption_model.to(device)
+for e in range(n_epochs):
+    print("Epoch=",e+1, " Loss=", round(train_one_epoch(),4), sep="")
+
+for e in range(1):
+    print("Epoch=",e+1, " Loss=", round(eval_one_epoch(),4), sep="")
