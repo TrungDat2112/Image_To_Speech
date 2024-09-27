@@ -1,8 +1,7 @@
 import pandas as pd
 from torchtext.data.utils import get_tokenizer
-from typing import Iterable
+from timeit import default_timer as timer
 from torchtext.vocab import build_vocab_from_iterator
-import re,string
 import torch
 from torch import nn
 from seqtoseq import *
@@ -17,22 +16,6 @@ raw_data = {
     }
 df = pd.DataFrame(raw_data, columns=["en", "vi"])
 
-def word_tokenize(text):
-    tokens = re.findall(r'\w+|[^\w\s]', text, re.UNICODE)
-    return tokens
-
-def preprocessing(df): 
-    df["en"] = df["en"].apply(lambda ele: ele.translate(str.maketrans('', '', string.punctuation))) # Remove punctuation
-    df["vi"] = df["vi"].apply(lambda ele: ele.translate(str.maketrans('', '', string.punctuation)))  
-    df["en"] = df["en"].apply(lambda ele: ele.lower()) # convert text to lowercase
-    df["vi"] = df["vi"].apply(lambda ele: ele.lower())
-    df["en"] = df["en"].apply(lambda ele: ele.strip()) 
-    df["vi"] = df["vi"].apply(lambda ele: ele.strip()) 
-    df["en"] = df["en"].apply(lambda ele: re.sub("\s+", " ", ele)) 
-    df["vi"] = df["vi"].apply(lambda ele: re.sub("\s+", " ", ele))
-        
-    return df
-
 SRC_LANGUAGE = 'en'
 TGT_LANGUAGE = 'vi'
 
@@ -40,18 +23,8 @@ TGT_LANGUAGE = 'vi'
 token_transform = {}
 vocab_transform = {}
 
-# Tokenize for vietnames by underthesea
-def vi_tokenizer(sentence):
-    tokens = word_tokenize(sentence)
-    return tokens
-
 token_transform[SRC_LANGUAGE] = get_tokenizer('basic_english')
 token_transform[TGT_LANGUAGE] = get_tokenizer(vi_tokenizer)
-
-# helper function to yield list of tokens
-def yield_tokens(data_iter: Iterable, language: str):    
-    for index,data_sample in data_iter:
-        yield token_transform[language](data_sample[language])
 
 UNK_IDX, PAD_IDX, BOS_IDX, EOS_IDX = 0, 1, 2, 3
 # Make sure the tokens are in order of their indices to properly insert them in vocab
@@ -72,12 +45,11 @@ for ln in [SRC_LANGUAGE, TGT_LANGUAGE]:
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
 torch.manual_seed(0)
 SRC_VOCAB_SIZE = len(vocab_transform[SRC_LANGUAGE])
 TGT_VOCAB_SIZE = len(vocab_transform[TGT_LANGUAGE])
 EMB_SIZE = 512
-NHEAD = 8 # embed_dim must be divisible by num_heads
+NHEAD = 8
 FFN_HID_DIM = 512
 BATCH_SIZE = 64
 NUM_ENCODER_LAYERS = 4
@@ -103,3 +75,25 @@ train = df.iloc[:split]
 train_ds = list(zip(train['en'],train['vi']))
 valid = df.iloc[split:]
 val_ds = list(zip(valid['en'],valid['vi']))
+
+
+early_stopping = EarlyStopping(tolerance=5, min_delta=0.1)
+NUM_EPOCHS = 30
+history = {
+        "loss": [], 
+        "val_los": []
+        }
+
+for epoch in range(1, NUM_EPOCHS+1):
+    start_time = timer()
+    train_loss = train_epoch(transformer, optimizer)
+    end_time = timer()
+    val_loss = evaluate(transformer)
+    history['loss'].append(train_loss)
+    history['val_los'].append(val_loss)
+    print((f"Epoch: {epoch}, Train loss: {train_loss:.3f}, Val loss: {val_loss:.3f}, "f"Epoch time = {(end_time - start_time):.3f}s"))
+    # Early Stopping
+    early_stopping(train_loss, val_loss)
+    if early_stopping.early_stop:
+        print("We are at epoch:", epoch)
+        break
